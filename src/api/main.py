@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import feedparser
 import requests
@@ -59,7 +59,6 @@ def _normalize_scores(events: List[Dict[str, Any]]) -> None:
             e["trend_score"] = 50.0
         return
 
-    # Spread scores into a readable range so cards don't all show 100/100.
     out_low = 35.0
     out_high = 92.0
     span = high - low
@@ -133,6 +132,20 @@ def _collect_rss(limit: int = 221) -> List[Dict[str, Any]]:
     return events[:limit]
 
 
+def _apply_filters(items: List[Dict[str, Any]], source: str, q: str) -> List[Dict[str, Any]]:
+    filtered = items
+    if source in ("hackernews", "rss"):
+        filtered = [e for e in filtered if e.get("source") == source]
+    if q:
+        ql = q.lower()
+        filtered = [
+            e
+            for e in filtered
+            if ql in str(e.get("text", "")).lower() or ql in str(e.get("author", "")).lower()
+        ]
+    return filtered
+
+
 def refresh_events() -> Dict[str, int]:
     global EVENTS
     hn_events = _collect_hn(limit=120)
@@ -185,21 +198,25 @@ async def collect():
 
 
 @app.get("/events")
-async def events(limit: int = 30, skip: int = 0):
-    safe_limit = max(1, min(limit, 200))
+async def events(limit: int = 30, skip: int = 0, source: Optional[str] = None, q: str = ""):
+    safe_limit = max(1, min(limit, 400))
     safe_skip = max(0, skip)
+    filtered = _apply_filters(EVENTS, source or "all", q)
     return {
-        "events": EVENTS[safe_skip : safe_skip + safe_limit],
-        "total": len(EVENTS),
+        "events": filtered[safe_skip : safe_skip + safe_limit],
+        "total": len(filtered),
         "skip": safe_skip,
         "limit": safe_limit,
+        "source": source,
+        "query": q,
     }
 
 
 @app.get("/events/trending")
-async def trending(limit: int = 30):
+async def trending(limit: int = 30, source: str = "all", q: str = ""):
     safe_limit = max(1, min(limit, 100))
-    return {"trending": EVENTS[:safe_limit], "total_returned": min(len(EVENTS), safe_limit)}
+    filtered = _apply_filters(EVENTS, source, q)
+    return {"trending": filtered[:safe_limit], "total_returned": min(len(filtered), safe_limit)}
 
 
 @app.get("/events/stats")
@@ -217,14 +234,17 @@ async def stats():
 
 
 @app.get("/feed", response_class=HTMLResponse)
-async def feed():
+async def feed(mode: str = "trending", source: str = "all", q: str = ""):
     total = len(EVENTS)
     hn = len([e for e in EVENTS if e["source"] == "hackernews"])
     rss = len([e for e in EVENTS if e["source"] == "rss"])
-    top = EVENTS[:30]
+
+    filtered = _apply_filters(EVENTS, source, q)
+    show_all = mode == "all"
+    visible = filtered if show_all else filtered[:30]
 
     cards_html = ""
-    for i, e in enumerate(top, 1):
+    for i, e in enumerate(visible, 1):
         icon, label = SOURCE_LABELS.get(e["source"], ("📰", e["source"].title()))
         color = SOURCE_COLORS.get(e["source"], "#64748b")
         cards_html += f'''
@@ -241,6 +261,8 @@ async def feed():
           </div>
         </div>'''
 
+    section_name = "All Matching Results" if show_all else "Top Trending"
+
     html = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -254,10 +276,14 @@ async def feed():
     .logo {{ font-size:22px; font-weight:800; color:#fff; letter-spacing:-0.5px; }}
     .logo span {{ color:#3b82f6; }}
     .badge {{ background:#1e3a5f; color:#7dd3fc; font-size:12px; padding:4px 12px; border-radius:99px; border:1px solid #1e40af; }}
-    .stats {{ display:flex; gap:24px; padding:24px 40px 0; flex-wrap:wrap; }}
-    .stat {{ background:#0f172a; border:1px solid #1e293b; border-radius:10px; padding:14px 20px; text-align:center; min-width:140px; }}
+    .stats {{ display:flex; gap:16px; padding:24px 40px 0; flex-wrap:wrap; }}
+    .stat {{ display:block; text-decoration:none; background:#0f172a; border:1px solid #1e293b; border-radius:10px; padding:14px 20px; text-align:center; min-width:140px; }}
     .stat-num {{ font-size:32px; font-weight:800; color:#3b82f6; }}
     .stat-label {{ font-size:12px; color:#64748b; margin-top:2px; }}
+    .stat:hover {{ border-color:#334155; }}
+    .filters {{ display:flex; gap:10px; padding:16px 40px 0; flex-wrap:wrap; align-items:center; }}
+    .filters input, .filters select {{ background:#0f172a; border:1px solid #334155; color:#e2e8f0; padding:8px 10px; border-radius:8px; }}
+    .filters button {{ background:#2563eb; color:#fff; border:none; padding:8px 12px; border-radius:8px; font-weight:700; cursor:pointer; }}
     .collect-btn {{ background:#3b82f6; color:#fff; border:none; cursor:pointer; font-size:14px; font-weight:700; padding:10px 16px; border-radius:10px; }}
     .grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(380px,1fr)); gap:16px; padding:24px 40px 40px; }}
     .section-title {{ padding:16px 40px 0; font-size:13px; color:#64748b; letter-spacing:0.05em; text-transform:uppercase; font-weight:600; }}
@@ -276,14 +302,28 @@ async def feed():
   </div>
 
   <div class="stats">
-    <div class="stat"><div class="stat-num">{total}</div><div class="stat-label">Total Collected</div></div>
-    <div class="stat"><div class="stat-num">{hn}</div><div class="stat-label">Hacker News</div></div>
-    <div class="stat"><div class="stat-num">{rss}</div><div class="stat-label">RSS Feeds</div></div>
-    <div class="stat"><div class="stat-num">{len(top)}</div><div class="stat-label">Trending Now</div></div>
+    <a class="stat" href="/feed?mode=all&source=all"><div class="stat-num">{total}</div><div class="stat-label">Total Collected (click)</div></a>
+    <a class="stat" href="/feed?mode=all&source=hackernews"><div class="stat-num">{hn}</div><div class="stat-label">Hacker News (click)</div></a>
+    <a class="stat" href="/feed?mode=all&source=rss"><div class="stat-num">{rss}</div><div class="stat-label">RSS Feeds (click)</div></a>
+    <a class="stat" href="/feed?mode=trending&source={source}&q={q}"><div class="stat-num">30</div><div class="stat-label">Trending Now (click)</div></a>
   </div>
 
+  <form class="filters" method="get" action="/feed">
+    <input type="text" name="q" placeholder="Search title/author" value="{q}" />
+    <select name="source">
+      <option value="all" {"selected" if source == "all" else ""}>All Sources</option>
+      <option value="hackernews" {"selected" if source == "hackernews" else ""}>Hacker News</option>
+      <option value="rss" {"selected" if source == "rss" else ""}>RSS</option>
+    </select>
+    <select name="mode">
+      <option value="trending" {"selected" if mode == "trending" else ""}>Top Trending (30)</option>
+      <option value="all" {"selected" if mode == "all" else ""}>All Matching</option>
+    </select>
+    <button type="submit">Apply</button>
+  </form>
+
   <div id="status" style="padding:8px 40px;font-size:13px;color:#22c55e;min-height:28px;"></div>
-  <div class="section-title">📈 Top Trending — Ranked by Relevance Score</div>
+  <div class="section-title">📈 {section_name} — Showing {len(visible)} of {len(filtered)} matched</div>
   <div class="grid">{cards_html}</div>
 
   <script>
