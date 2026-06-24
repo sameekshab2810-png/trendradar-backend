@@ -46,15 +46,39 @@ def _safe_get(url: str, timeout: int = 15):
     return requests.get(url, timeout=timeout, headers={"User-Agent": "TrendRadar/0.1"})
 
 
+def _normalize_scores(events: List[Dict[str, Any]]) -> None:
+    if not events:
+        return
+
+    raw_scores = [float(e.get("raw_score", 0.0)) for e in events]
+    low = min(raw_scores)
+    high = max(raw_scores)
+
+    if high <= low:
+        for e in events:
+            e["trend_score"] = 50.0
+        return
+
+    # Spread scores into a readable range so cards don't all show 100/100.
+    out_low = 35.0
+    out_high = 92.0
+    span = high - low
+    out_span = out_high - out_low
+
+    for e in events:
+        normalized = out_low + ((float(e.get("raw_score", 0.0)) - low) / span) * out_span
+        e["trend_score"] = round(normalized, 1)
+
+
 def _collect_hn(limit: int = 120) -> List[Dict[str, Any]]:
     events = []
     try:
         top_ids = _safe_get("https://hacker-news.firebaseio.com/v0/topstories.json").json()[:limit]
-        for idx, story_id in enumerate(top_ids, 1):
+        for story_id in top_ids:
             item = _safe_get(f"https://hacker-news.firebaseio.com/v0/item/{story_id}.json").json() or {}
             title = item.get("title") or "Untitled Hacker News Story"
             url = item.get("url") or f"https://news.ycombinator.com/item?id={story_id}"
-            score = float(min(100, max(0, (item.get("score") or 0))))
+            raw_score = float(max(0, (item.get("score") or 0)))
             ts = datetime.fromtimestamp(item.get("time") or datetime.now(timezone.utc).timestamp(), tz=timezone.utc)
             events.append(
                 {
@@ -64,8 +88,9 @@ def _collect_hn(limit: int = 120) -> List[Dict[str, Any]]:
                     "text": title,
                     "url": url,
                     "author": item.get("by") or "hn-user",
-                    "engagement": int(score),
-                    "trend_score": score,
+                    "engagement": int(raw_score),
+                    "raw_score": raw_score,
+                    "trend_score": raw_score,
                     "relevance_tags": ["AI"] if "ai" in title.lower() else ["tech"],
                     "event_metadata": {"description": "Top story from Hacker News."},
                 }
@@ -86,7 +111,7 @@ def _collect_rss(limit: int = 221) -> List[Dict[str, Any]]:
                 title = getattr(entry, "title", None) or "Untitled RSS Item"
                 url = getattr(entry, "link", None) or feed_url
                 published = getattr(entry, "published", None) or datetime.now(timezone.utc).isoformat()
-                score = float(max(35, min(80, 50 + (len(title) % 25))))
+                raw_score = float(max(35, min(80, 50 + (len(title) % 25))))
                 events.append(
                     {
                         "id": len(events) + 1,
@@ -95,8 +120,9 @@ def _collect_rss(limit: int = 221) -> List[Dict[str, Any]]:
                         "text": title,
                         "url": url,
                         "author": getattr(entry, "author", None) or "rss-feed",
-                        "engagement": int(score),
-                        "trend_score": score,
+                        "engagement": int(raw_score),
+                        "raw_score": raw_score,
+                        "trend_score": raw_score,
                         "relevance_tags": ["telematics"] if "fleet" in title.lower() else ["news"],
                         "event_metadata": {"description": "Latest item from RSS feed."},
                     }
@@ -111,7 +137,9 @@ def refresh_events() -> Dict[str, int]:
     global EVENTS
     hn_events = _collect_hn(limit=120)
     rss_events = _collect_rss(limit=221)
-    EVENTS = sorted(hn_events + rss_events, key=lambda e: e.get("trend_score", 0), reverse=True)
+    combined = hn_events + rss_events
+    _normalize_scores(combined)
+    EVENTS = sorted(combined, key=lambda e: e.get("trend_score", 0), reverse=True)
     return {
         "total": len(EVENTS),
         "hackernews": len(hn_events),
