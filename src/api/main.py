@@ -1,4 +1,8 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
+from typing import Any, Dict, List
+
+import feedparser
+import requests
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
@@ -7,6 +11,12 @@ app = FastAPI(
     version="0.1.0",
     description="AI-Powered Fleet-Tech & Telematics Trend Intelligence Platform",
 )
+
+RSS_FEEDS = [
+    "https://techcrunch.com/feed/",
+    "https://feeds.arstechnica.com/arstechnica/technology-lab",
+    "https://www.ttnews.com/rss.xml",
+]
 
 SOURCE_LABELS = {
     "hackernews": ("🟠", "Hacker News"),
@@ -18,75 +28,11 @@ SOURCE_COLORS = {
     "rss": "#0ea5e9",
 }
 
-
-def _seed_events():
-    now = datetime.now(timezone.utc)
-    events = []
-
-    hn_titles = [
-        "Elevated error rate across multiple models",
-        "Mistral OCR 4",
-        "What we call age verification is actually mass surveillance",
-        "We're making Bunny DNS free",
-        "F3",
-    ]
-    rss_titles = [
-        "AI's Affordability Crisis",
-        "Lift4D: Harmonizing single-view 3D estimation",
-        "Fleet telematics adoption rises in logistics sector",
-        "EV fleet optimization with route intelligence",
-        "Connected fleet safety analytics in 2026",
-    ]
-
-    # Seed to resemble your previous Phase 1 counts
-    # 120 Hacker News + 221 RSS = 341 total
-    for i in range(120):
-        title = hn_titles[i % len(hn_titles)]
-        score = max(40, 62 - (i % 20))
-        events.append(
-            {
-                "id": len(events) + 1,
-                "source": "hackernews",
-                "timestamp": (now - timedelta(minutes=i)).isoformat(),
-                "text": title,
-                "url": f"https://news.ycombinator.com/item?id={100000 + i}",
-                "author": "hn-user",
-                "engagement": score,
-                "trend_score": float(score),
-                "relevance_tags": ["AI"] if i % 2 == 0 else ["fleet"],
-            }
-        )
-
-    for i in range(221):
-        title = rss_titles[i % len(rss_titles)]
-        score = max(35, 61 - (i % 18))
-        events.append(
-            {
-                "id": len(events) + 1,
-                "source": "rss",
-                "timestamp": (now - timedelta(minutes=120 + i)).isoformat(),
-                "text": title,
-                "url": f"https://example.com/article/{200000 + i}",
-                "author": "rss-feed",
-                "engagement": score,
-                "trend_score": float(score),
-                "relevance_tags": ["telematics"] if i % 2 == 0 else ["AI"],
-            }
-        )
-
-    events.sort(key=lambda e: e["trend_score"], reverse=True)
-    return events
-
-
-EVENTS = _seed_events()
-
-
-def _source_count(source: str):
-    return len([e for e in EVENTS if e["source"] == source])
+EVENTS: List[Dict[str, Any]] = []
 
 
 def _score_bar(score: float) -> str:
-    pct = int(score)
+    pct = int(max(0, min(score, 100)))
     color = "#22c55e" if score >= 50 else "#f59e0b" if score >= 25 else "#94a3b8"
     return f'''<div style="display:flex;align-items:center;gap:8px;margin-top:8px;">
         <div style="flex:1;background:#1e293b;border-radius:99px;height:8px;">
@@ -96,13 +42,96 @@ def _score_bar(score: float) -> str:
     </div>'''
 
 
+def _safe_get(url: str, timeout: int = 15):
+    return requests.get(url, timeout=timeout, headers={"User-Agent": "TrendRadar/0.1"})
+
+
+def _collect_hn(limit: int = 120) -> List[Dict[str, Any]]:
+    events = []
+    try:
+        top_ids = _safe_get("https://hacker-news.firebaseio.com/v0/topstories.json").json()[:limit]
+        for idx, story_id in enumerate(top_ids, 1):
+            item = _safe_get(f"https://hacker-news.firebaseio.com/v0/item/{story_id}.json").json() or {}
+            title = item.get("title") or "Untitled Hacker News Story"
+            url = item.get("url") or f"https://news.ycombinator.com/item?id={story_id}"
+            score = float(min(100, max(0, (item.get("score") or 0))))
+            ts = datetime.fromtimestamp(item.get("time") or datetime.now(timezone.utc).timestamp(), tz=timezone.utc)
+            events.append(
+                {
+                    "id": len(events) + 1,
+                    "source": "hackernews",
+                    "timestamp": ts.isoformat(),
+                    "text": title,
+                    "url": url,
+                    "author": item.get("by") or "hn-user",
+                    "engagement": int(score),
+                    "trend_score": score,
+                    "relevance_tags": ["AI"] if "ai" in title.lower() else ["tech"],
+                    "event_metadata": {"description": "Top story from Hacker News."},
+                }
+            )
+    except Exception:
+        return []
+    return events
+
+
+def _collect_rss(limit: int = 221) -> List[Dict[str, Any]]:
+    events = []
+    per_feed = max(1, limit // len(RSS_FEEDS))
+
+    for feed_url in RSS_FEEDS:
+        try:
+            parsed = feedparser.parse(feed_url)
+            for entry in parsed.entries[:per_feed]:
+                title = getattr(entry, "title", None) or "Untitled RSS Item"
+                url = getattr(entry, "link", None) or feed_url
+                published = getattr(entry, "published", None) or datetime.now(timezone.utc).isoformat()
+                score = float(max(35, min(80, 50 + (len(title) % 25))))
+                events.append(
+                    {
+                        "id": len(events) + 1,
+                        "source": "rss",
+                        "timestamp": published,
+                        "text": title,
+                        "url": url,
+                        "author": getattr(entry, "author", None) or "rss-feed",
+                        "engagement": int(score),
+                        "trend_score": score,
+                        "relevance_tags": ["telematics"] if "fleet" in title.lower() else ["news"],
+                        "event_metadata": {"description": "Latest item from RSS feed."},
+                    }
+                )
+        except Exception:
+            continue
+
+    return events[:limit]
+
+
+def refresh_events() -> Dict[str, int]:
+    global EVENTS
+    hn_events = _collect_hn(limit=120)
+    rss_events = _collect_rss(limit=221)
+    EVENTS = sorted(hn_events + rss_events, key=lambda e: e.get("trend_score", 0), reverse=True)
+    return {
+        "total": len(EVENTS),
+        "hackernews": len(hn_events),
+        "rss": len(rss_events),
+    }
+
+
+@app.on_event("startup")
+async def startup_refresh():
+    if not EVENTS:
+        refresh_events()
+
+
 @app.get("/")
 async def root():
     return {
         "status": "ok",
         "message": "TrendRadar API — Fleet-Tech Intelligence",
         "version": "0.1.0",
-        "endpoints": ["/health", "/events", "/events/stats", "/events/trending", "/feed"],
+        "endpoints": ["/health", "/collect", "/events", "/events/stats", "/events/trending", "/feed"],
     }
 
 
@@ -111,13 +140,24 @@ async def health():
     return {
         "status": "healthy",
         "version": "0.1.0",
-        "database": "render-seeded",
+        "database": "render-runtime",
         "total_events": len(EVENTS),
     }
 
 
+@app.post("/collect")
+async def collect():
+    counts = refresh_events()
+    return {
+        "status": "collection_completed",
+        "total_events_collected": counts["total"],
+        "new_events_saved": counts["total"],
+        "by_source": {"hackernews": counts["hackernews"], "rss": counts["rss"]},
+    }
+
+
 @app.get("/events")
-async def events(limit: int = 50, skip: int = 0):
+async def events(limit: int = 30, skip: int = 0):
     safe_limit = max(1, min(limit, 200))
     safe_skip = max(0, skip)
     return {
@@ -131,20 +171,16 @@ async def events(limit: int = 50, skip: int = 0):
 @app.get("/events/trending")
 async def trending(limit: int = 30):
     safe_limit = max(1, min(limit, 100))
-    return {
-        "trending": EVENTS[:safe_limit],
-        "total_returned": safe_limit,
-    }
+    return {"trending": EVENTS[:safe_limit], "total_returned": min(len(EVENTS), safe_limit)}
 
 
 @app.get("/events/stats")
 async def stats():
+    hn = len([e for e in EVENTS if e["source"] == "hackernews"])
+    rss = len([e for e in EVENTS if e["source"] == "rss"])
     return {
         "total_events": len(EVENTS),
-        "by_source": {
-            "hackernews": _source_count("hackernews"),
-            "rss": _source_count("rss"),
-        },
+        "by_source": {"hackernews": hn, "rss": rss},
         "top_3_by_score": [
             {"title": e["text"], "score": e["trend_score"], "source": e["source"]}
             for e in EVENTS[:3]
@@ -155,8 +191,8 @@ async def stats():
 @app.get("/feed", response_class=HTMLResponse)
 async def feed():
     total = len(EVENTS)
-    hn = _source_count("hackernews")
-    rss = _source_count("rss")
+    hn = len([e for e in EVENTS if e["source"] == "hackernews"])
+    rss = len([e for e in EVENTS if e["source"] == "rss"])
     top = EVENTS[:30]
 
     cards_html = ""
@@ -166,9 +202,7 @@ async def feed():
         cards_html += f'''
         <div style="background:#0f172a;border:1px solid #1e293b;border-radius:14px;padding:20px 24px;">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-            <span style="background:{color}22;color:{color};font-size:11px;font-weight:700;padding:3px 10px;border-radius:99px;border:1px solid {color}44;">
-              {icon} {label}
-            </span>
+            <span style="background:{color}22;color:{color};font-size:11px;font-weight:700;padding:3px 10px;border-radius:99px;border:1px solid {color}44;">{icon} {label}</span>
             <span style="color:#475569;font-size:11px;">#{i}</span>
           </div>
           <h3 style="margin:0 0 8px 0;font-size:16px;font-weight:600;color:#f1f5f9;line-height:1.4;">{e['text']}</h3>
@@ -196,6 +230,7 @@ async def feed():
     .stat {{ background:#0f172a; border:1px solid #1e293b; border-radius:10px; padding:14px 20px; text-align:center; min-width:140px; }}
     .stat-num {{ font-size:32px; font-weight:800; color:#3b82f6; }}
     .stat-label {{ font-size:12px; color:#64748b; margin-top:2px; }}
+    .collect-btn {{ background:#3b82f6; color:#fff; border:none; cursor:pointer; font-size:14px; font-weight:700; padding:10px 16px; border-radius:10px; }}
     .grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(380px,1fr)); gap:16px; padding:24px 40px 40px; }}
     .section-title {{ padding:16px 40px 0; font-size:13px; color:#64748b; letter-spacing:0.05em; text-transform:uppercase; font-weight:600; }}
   </style>
@@ -208,6 +243,7 @@ async def feed():
     </div>
     <div style="display:flex;align-items:center;gap:12px;">
       <span class="badge">Render Live</span>
+      <button class="collect-btn" onclick="collectNow()">⚡ Collect Latest</button>
     </div>
   </div>
 
@@ -218,8 +254,23 @@ async def feed():
     <div class="stat"><div class="stat-num">{len(top)}</div><div class="stat-label">Trending Now</div></div>
   </div>
 
+  <div id="status" style="padding:8px 40px;font-size:13px;color:#22c55e;min-height:28px;"></div>
   <div class="section-title">📈 Top Trending — Ranked by Relevance Score</div>
   <div class="grid">{cards_html}</div>
+
+  <script>
+    async function collectNow() {{
+      document.getElementById('status').textContent = 'Collecting latest data...';
+      try {{
+        const r = await fetch('/collect', {{ method: 'POST' }});
+        const d = await r.json();
+        document.getElementById('status').textContent = 'Collected ' + d.total_events_collected + ' events. Refreshing...';
+        setTimeout(() => location.reload(), 1500);
+      }} catch (e) {{
+        document.getElementById('status').textContent = 'Collection failed. Try again.';
+      }}
+    }}
+  </script>
 </body>
 </html>'''
     return HTMLResponse(content=html)
