@@ -13,9 +13,54 @@ app = FastAPI(
 )
 
 RSS_FEEDS = [
+    # Tech & AI (5)
     "https://techcrunch.com/feed/",
     "https://feeds.arstechnica.com/arstechnica/technology-lab",
+    "https://www.theverge.com/rss/index.xml",
+    "https://feeds.bloomberg.com/markets/news.rss",
+    "https://feeds.wired.com/wired/index",
+    
+    # Fleet & Telematics (8)
     "https://www.ttnews.com/rss.xml",
+    "https://www.fleetowner.com/rss.xml",
+    "https://www.truckinginfo.com/feed/",
+    "https://www.inboundlogistics.com/cms/rss/",
+    "https://www.fleet.com/rss.xml",
+    "https://www.logistics.com/rss.xml",
+    "https://www.transporttopics.com/RSS.aspx",
+    "https://www.logistics360.com/feed/",
+    
+    # Autonomous Vehicles & Mobility (6)
+    "https://www.autonews.com/rss.xml",
+    "https://www.greencarcongress.com/rss.xml",
+    "https://electrek.co/feed/",
+    "https://www.torquenews.com/feed",
+    "https://www.vehicledynamics.com/feed/",
+    "https://www.mobilitytoday.com/rss.xml",
+    
+    # IoT & Connected Devices (4)
+    "https://iotassets.s3.amazonaws.com/media/iotforall.xml",
+    "https://www.iot.electronicdesign.com/rss.xml",
+    "https://www.iotworldtoday.com/feed/",
+    "https://www.iotevents.com/rss/",
+    
+    # Supply Chain & Logistics Tech (5)
+    "https://www.supplychaindive.com/feed/",
+    "https://www.logisticsmgmt.com/rss.xml",
+    "https://www.containerjournal.com/rss.xml",
+    "https://www.porteconomics.eu/feed/",
+    "https://www.scm.com/rss.xml",
+    
+    # Enterprise & Cloud Computing (4)
+    "https://www.containerjournal.com/rss.xml",
+    "https://kubernetes.io/feed.xml",
+    "https://cloud.google.com/feeds",
+    "https://aws.amazon.com/new/feed/",
+    
+    # Security & Privacy (3)
+    "https://feeds.darkreading.com/darkreading/index.rss",
+    "https://www.bleepingcomputer.com/feed/",
+    "https://www.scmagazine.com/feed/",
 ]
 
 SOURCE_LABELS = {
@@ -99,7 +144,7 @@ def _collect_hn(limit: int = 120) -> List[Dict[str, Any]]:
     return events
 
 
-def _collect_rss(limit: int = 221) -> List[Dict[str, Any]]:
+def _collect_rss(limit: int = 520) -> List[Dict[str, Any]]:
     events = []
     per_feed = max(1, limit // len(RSS_FEEDS))
 
